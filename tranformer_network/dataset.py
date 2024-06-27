@@ -13,9 +13,9 @@ class BilingualDataset(nn.Module):
         self.target_lang = target_lang
         self.seq_length = seq_length
 
-        self.sos_token = torch.Tensor([src_tokenizer.token_to_id("[SOS]")], dtype = torch.long)
-        self.eos_token = torch.Tensor([src_tokenizer.token_to_id("[EOS]")], dtype = torch.long)
-        self.pad_token = torch.Tensor([src_tokenizer.token_to_id("[PAD]")], dtype = torch.long)
+        self.sos_token = torch.tensor([src_tokenizer.token_to_id("[SOS]")], dtype = torch.long)
+        self.eos_token = torch.tensor([src_tokenizer.token_to_id("[EOS]")], dtype = torch.long)
+        self.pad_token = torch.tensor([src_tokenizer.token_to_id("[PAD]")], dtype = torch.long)
         
     def __len__(self):
         return len(self.dataset)

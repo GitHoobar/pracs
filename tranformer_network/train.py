@@ -34,7 +34,7 @@ def get_or_build_tokenizer(config, dataset, lang):
     return tokenizer        
 
 def get_dataset(config):
-    dataset_raw = load_dataset('opus_books', f'{config["lang_src"]} - {config["lang_target"]}', split = 'train')
+    dataset_raw = load_dataset('opus_books', f'{config["lang_src"]}-{config["lang_target"]}', split = 'train')
 
     # Build Tokenizer
     src_tokenizer = get_or_build_tokenizer(config, dataset_raw, config['lang_src'])
@@ -74,7 +74,7 @@ def get_model(config, vocab_src_len, vocab_target_len):
 
 def train_model(config):
     #define the device
-    device = torch.device['cuda' if torch.cuda.is_available() else 'cpu']
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
     Path(config['model_folder']).mkdir(parents = True, exist_ok = True)
