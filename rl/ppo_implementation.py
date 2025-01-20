@@ -44,7 +44,16 @@ class Agent(nn.Module):
               nn.Tanh(),
               layer_init(nn.Linear(64, envs.single_action_space.n), std = 0.01),
          )
-
+    
+    def get_value(self, x):
+         return self.critic(x)
+    
+    def get_action_and_value(self, x, action = None):
+         logits = self.actor(x)
+         probs = Categorical(logits=logits)
+         if action is None:
+              action = probs.sample()
+         return action, probs.log_prob(action), probs.entropy(), self.critic(x)
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -71,6 +80,14 @@ def parse_args():
                         help = "no of parallel games environment")
     parser.add_argument('--num-steps', type = int, default=128,
                         help = "no of steps to run in each environment per policy rollout")
+    parser.add_argument('--anneal-lr', type = lambda x: bool(strtobool(x)), default = True, nargs='?', const = True,
+                        help = "toggle learning rate annealing for policy and value network")
+    parser.add_argument('--gae', type = lambda x: bool(strtobool(x)), default=True, nargs='?', const = True,
+                        help = "use GAE for advantage computation")
+    parser.add_argument('--gamma', type = float, default=0.99,
+                        help = "discount factor")
+    parser.add_argument('--gae-lambda', type = float, default=0.95,
+                        help = "lambda for gae")
     
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
@@ -78,15 +95,14 @@ def parse_args():
 
 if  __name__ == '__main__':
     args = parse_args()
-    print(args)
-
+    # print(args)
 
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
-    device = 'cuda' if torch.cuda.is_available() and args.cuda else 'mps'
+    device = 'cuda' if torch.cuda.is_available() and args.cuda else 'cpu'
     print(device)
 
     # env = gym.make("CartPole-v1", render_mode = 'rgb_array')
@@ -117,17 +133,17 @@ if  __name__ == '__main__':
         [make_env(args.gym_id, args.seed + i, i, args.capture_video, args.exp_name)
         for i in range(args.num_envs)])
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
-    print("envs.single_observation_space.shape", envs.single_observation_space.shape)
-    print("envs.single_action_space.n", envs.single_action_space.n)
+    # print("envs.single_observation_space.shape", envs.single_observation_space.shape)
+    # print("envs.single_action_space.n", envs.single_action_space.n)
 
     agent = Agent(envs).to(device)
-    print(agent)
+    # print(agent)
     optimizer = optim.Adam(agent.parameters(), lr = args.learning_rate, eps = 1e-5)
 
     #ALGO LOGIC
 
-    obs = torch.zeros((args.num_steps, args.num_envs)) + envs.single_observation_space.to(device)
-    actions = torch.zeros((args.num_steps, args.num_envs)) + envs.single_action_space.to(device)
+    obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
+    actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
     logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
     dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
@@ -136,10 +152,72 @@ if  __name__ == '__main__':
 
     GLOBAL_STEP = 0
     start_time = time.time()
-    next_obs = torch.Tensor(envs.reset()).to(device)
-    next_done = torch.Tensor(args.num_envs).to(device)
+    next_obs = torch.Tensor(envs.reset()[0]).to(device)
+    next_done = torch.zeros(args.num_envs).to(device)
     num_updates = args.total_timesteps // args.batch_size
-    print(num_updates)
+    # print(num_updates)
+    # print("next_obs.shape", next_obs.shape)
+    # print("agent.get_value(next_obs)", agent.get_value(next_obs))
+    # print("agent.get_value(next_obs).shape", agent.get_value(next_obs).shape)
+    # print()
+    # print("agent.get_action_and_value(next_obs)", agent.get_action_and_value(next_obs))
+
+    for update in range(1, num_updates + 1):
+         # Annealing the rate if instructed to:
+        if args.anneal_lr:
+            frac = 1.0 - (update - 1.0) / num_updates
+            lrnow = frac * args.learning_rate
+            optimizer.param_groups[0]["lr"] = lrnow
+
+        for step in range(0, args.num_steps):
+            GLOBAL_STEP +=  1 * args.num_envs
+            obs[step] = next_obs
+            dones[step] = next_done
+
+            with torch.inference_mode():
+                action, logprob, _, value = agent.get_action_and_value(next_obs)
+                values[step] = value.flatten()
+
+            actions[step] = action
+            logprobs[step] = logprob 
+
+            next_obs, reward, terminated, truncated, info = envs.step(action.cpu().numpy())
+            rewards[step] = torch.tensor(reward).to(device).view(-1)
+            next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(terminated).to(device)  
+
+            for item in info:
+                 if "episode" in item:
+                      print(f"global step = {GLOBAL_STEP}, episodic return = {info['episode']['r']}")
+                      break
+         
+                      
+        with torch.inference_mode():
+            next_value = args.get_value(next_obs).reshape(-1, -1)
+            if args.gae:
+                advantages = torch.zeros_like(rewards).to(device)
+                lastgaelam = 0
+                for t in reversed(range(args.num_steps)):
+                    if t == args.num_steps - 1:
+                        nextnonterminal = 1.0 - next_value
+                        next_values = next_value
+                    else:
+                        nextnonterminal = 1.0 - dones[t+1]
+                        next_values = values[t+1]
+                    delta = rewards[t] + args.gamma * next_values * nextnonterminal - values[t]
+                    advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
+                returns = advantages + values
+            else:
+                returns = torch.zeros_like(rewards).to(device)
+                for t in reversed(range(args.num_steps)):
+                    if t == args.num_steps - 1:
+                        nextnonterminal = 1.0 - next_done
+                        next_return = next_value
+                    else:
+                        nextnonterminal = 1.0 - dones[t+1]
+                        next_values = returns[t+1]
+                    returns[t] = rewards[t] * args.gamma * nextnonterminal * next_return
+                advantages = returns - values
+
 
 
 
